@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -27,13 +28,31 @@ import (
 const mainTemplateString = `package main
 
 import (
+	"flag"
 	"log"
 	"net/http"
 
 	"{{.ProjectPath}}/handler"
+	"{{.ProjectPath}}/mapper"
 )
 
 func main(){
+	dbHost := flag.String("dbhost", "localhost", "the database host")
+	dbPort := flag.String("dbport", "{{.DbPort}}", "the database port")
+	dbUser := flag.String("dbuser", "user", "the database user")
+	dbName := flag.String("dbname", "user", "the database name")
+	dbPassword := flag.String("dbpass", "", "database password")
+//	natsHost := flag.String("natshost", "nats", "host of nats")
+//	natsPort := flag.String("natsport", "4222", "port of nats")
+	flag.Parse()
+	dbconfig := map[string]string{
+		"host" : *dbHost,
+		"port" : *dbPort,
+		"user" : *dbUser,
+		"password" : *dbPassword,
+		"name" : *dbName,
+	}
+	mapper.Configure(dbconfig)
 	r := handler.Router
 	log.Println("listening on port 8080")
 	log.Fatal(http.ListenAndServe(":8080",r))
@@ -59,6 +78,9 @@ push: integration_test
 	docker login -u="$DOCKER_USERNAME" -p="$DOCKER_PASSWORD" -e="$DOCKER_EMAIL" \
 	docker push openservice/lecture-service:latest
 `
+
+const configTemplate = `database: {{.DbName}}
+project_path: {{.ProjectPath}}`
 
 const handlerTemplateString = `package handler
 
@@ -133,6 +155,59 @@ services:
 			- "SERVICE_NAME=nats-remote"
 `
 
+const postgresRootMapperContent = `package mapper
+
+import (
+	"strconv"
+
+	"github.com/InteractiveLecture/pgmapper"
+)
+
+var dbmapper *pgmapper.Mapper
+
+func Configure(databaseConfig map[string]string) {
+	config := pgmapper.DefaultConfig()
+	if v, ok := databaseConfig["ssl"]; ok {
+		res, err := strconv.ParseBool(v)
+		if err != nil {
+			panic(err)
+		}
+		config.Ssl = res
+	}
+	if v, ok := databaseConfig["host"]; ok {
+		config.Host = v
+	}
+	if v, ok := databaseConfig["user"]; ok {
+		config.User = v
+	}
+	if v, ok := databaseConfig["password"]; ok {
+		config.Password = v
+	}
+	if v, ok := databaseConfig["name"]; ok {
+		config.Database = v
+	}
+	if v, ok := databaseConfig["port"]; ok {
+		res, err := strconv.Atoi(v)
+		if err != nil {
+			panic(err)
+		}
+		config.Port = res
+	}
+	m, err := pgmapper.New(config)
+	dbmapper = m
+	if err != nil {
+		panic(err)
+	}
+}
+`
+
+//TODO complete mongo template
+const mongoRootMapperContent = `package mapper
+
+func Configure(databaseConfig map[string]string) {
+}
+`
+
 var database string
 
 type InitConfig struct {
@@ -140,6 +215,7 @@ type InitConfig struct {
 	DbImage     string
 	DbPort      int
 	DbEnvs      map[string]string
+	DbName      string
 	ProjectPath string
 	HasDatabase bool
 }
@@ -158,12 +234,6 @@ to quickly create a Cobra application.`,
 		if len(args) < 1 {
 			log.Fatal("no names given.")
 		}
-		dockerFileTmpl := createTemplate("Dockerfile", dockerfileTemplateString)
-		makefileTmpl := createTemplate("Makefile", makefileTemplateString)
-		handlerTmpl := createTemplate("handler.go", handlerTemplateString)
-		mainTmpl := createTemplate("main.go", mainTemplateString)
-		dockerComposeTmpl := createTemplate("docker-compose.yml", dockerComposeTemplateString)
-
 		for _, v := range args {
 			parts := strings.Split(v, "/")
 			serviceName := parts[len(parts)-1]
@@ -174,6 +244,7 @@ to quickly create a Cobra application.`,
 				con.DbImage = "postgres"
 				con.DbPort = 54322
 				con.HasDatabase = true
+				con.DbName = "postgres"
 				con.DbEnvs = map[string]string{
 					"POSTGRES_PASSWORD": "postgres",
 					"POSTGRES_USER":     "postgres",
@@ -200,13 +271,19 @@ to quickly create a Cobra application.`,
 			}
 			if database == "postgres" {
 				CheckError(os.MkdirAll(fullPath+"/database/ddl", os.ModePerm))
+				createFile(fullPath+"/mapper/mapper.go", postgresRootMapperContent)
+			} else {
+				createFile(fullPath+"/mapper/mapper.go", mongoRootMapperContent)
 			}
 
-			createFile(fullPath+"/main.go", con, mainTmpl)
-			createFile(fullPath+"/Dockerfile", con, dockerFileTmpl)
-			createFile(fullPath+"/integration-test/docker-compose.yml", con, dockerComposeTmpl)
-			createFile(fullPath+"/handler/handler.go", con, handlerTmpl)
-			createFile(fullPath+"/Makefile", con, makefileTmpl)
+			fmt.Println("project_path is:", con.ProjectPath)
+
+			createFileWithTemplate(fullPath+"/main.go", con, mainTemplateString)
+			createFileWithTemplate(fullPath+"/.osg.yml", con, configTemplate)
+			createFileWithTemplate(fullPath+"/Dockerfile", con, dockerfileTemplateString)
+			createFileWithTemplate(fullPath+"/integration-test/docker-compose.yml", con, dockerComposeTemplateString)
+			createFileWithTemplate(fullPath+"/handler/handler.go", con, handlerTemplateString)
+			createFileWithTemplate(fullPath+"/Makefile", con, makefileTemplateString)
 		}
 	},
 }
@@ -218,11 +295,20 @@ func createTemplate(name, content string) *template.Template {
 	return result
 }
 
-func createFile(path string, data interface{}, template *template.Template) {
+func createFile(path, data string) {
 	f, err := os.Create(path)
 	CheckError(err)
 	defer f.Close()
-	CheckError(template.Execute(f, data))
+	_, err = io.Copy(f, strings.NewReader(data))
+	CheckError(err)
+}
+
+func createFileWithTemplate(path string, data interface{}, templateString string) {
+	tmpl := createTemplate(path, templateString)
+	f, err := os.Create(path)
+	CheckError(err)
+	defer f.Close()
+	CheckError(tmpl.Execute(f, data))
 }
 
 func init() {
