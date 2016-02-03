@@ -16,8 +16,10 @@ package cmd
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -80,10 +82,10 @@ func (r ResourceData) BuildInsertStatementWithParameters() string {
 	for k, _ := range r.Attributes {
 		stmt = fmt.Sprintf("%s %s,", stmt, strings.ToLower(k))
 		paramList = fmt.Sprintf("%s $%d,", paramList, index)
-		realParameters = fmt.Sprintf("%s %s,", realParameters, strings.ToLower(k))
+		realParameters = fmt.Sprintf("%s entity.%s,", realParameters, k)
 		index = index + 1
 	}
-	return strings.TrimRight(stmt, ",") + ") " + strings.TrimRight(paramList, ",") + ")\",id," + strings.TrimRight(realParameters, ",")
+	return strings.TrimRight(stmt, ",") + ") " + strings.TrimRight(paramList, ",") + ")\",entity.Id," + strings.TrimRight(realParameters, ",")
 }
 
 func (r ResourceData) BuildUpdateStatementWithParameters() string {
@@ -92,10 +94,10 @@ func (r ResourceData) BuildUpdateStatementWithParameters() string {
 	index := 1
 	for k, _ := range r.Attributes {
 		stmt = fmt.Sprintf("%s %s=$%d,", stmt, strings.ToLower(k), index)
-		realParameters = fmt.Sprintf("%s %s,", realParameters, strings.ToLower(k))
+		realParameters = fmt.Sprintf("%s entity.%s,", realParameters, k)
 		index = index + 1
 	}
-	return fmt.Sprintf("%s WHERE id = $%d \",%s,id", strings.TrimRight(stmt, ","), index, strings.TrimRight(realParameters, ","))
+	return fmt.Sprintf("%s WHERE id = $%d \",%s,entity.Id", strings.TrimRight(stmt, ","), index, strings.TrimRight(realParameters, ","))
 }
 
 func (r ResourceData) LowercaseName() string {
@@ -188,9 +190,9 @@ func CreateOrUpdate{{.Name}}Handler() http.Handler {
 			return
 		}
 		if r.Method == "POST" {
-			err = mapper.Create{{.Name}}({{.CreateOrUpdateParameterList}})
+			err = mapper.Create{{.Name}}(entity)
 		} else {
-			err = mapper.Update{{.Name}}({{.CreateOrUpdateParameterList}})
+			err = mapper.Update{{.Name}}(entity)
 		}
 		if err != nil {
 			w.WriteHeader(500)
@@ -200,6 +202,31 @@ func CreateOrUpdate{{.Name}}Handler() http.Handler {
 	return http.Handler(http.HandlerFunc(result))
 }
 `
+
+const resourceDatabaseTemplateString = `CREATE TABLE {{.Name}}(
+	{{.BuildDatabaseFields}}
+);
+`
+
+func (r ResourceData) BuildDatabaseFields() string {
+	databaseFields := "id varchar PRIMARY KEY"
+	for k, v := range r.Attributes {
+		databaseFields = databaseFields + ",\n" + k
+		switch v {
+		case "int":
+			databaseFields = databaseFields + " integer"
+		case "string":
+			databaseFields = databaseFields + " varchar"
+		case "bool":
+			databaseFields = databaseFields + " boolean"
+		case "time.Time":
+			databaseFields = databaseFields + " timestamp"
+		default:
+			fmt.Println("invalid datatype: ", v)
+		}
+	}
+	return databaseFields
+}
 
 func (r ResourceData) CreateOrUpdateParameterList() string {
 	paramList := "entity.Id"
@@ -267,11 +294,11 @@ func GetOne{{.Name}}(id string) (*{{.Name}}, error) {
 	return &a, nil
 }
 
-func Create{{.Name}}({{.BuildParameterList}}) error {
+func Create{{.Name}}(entity {{.Name}}) error {
 	return dbmapper.Execute({{.BuildInsertStatementWithParameters}})
 }
 
-func Update{{.Name}}({{.BuildParameterList}}) error {
+func Update{{.Name}}(entity {{.Name}}) error {
 	_, err := dbmapper.ExecuteRaw({{.BuildUpdateStatementWithParameters}})
 	return err
 }
@@ -299,7 +326,7 @@ to quickly create a Cobra application.`,
 		}
 		rd := ResourceData{}
 		rd.Attributes = make(map[string]string)
-		rd.Name, args = args[0], args[1:]
+		rd.Name, args = strings.Title(args[0]), args[1:]
 		database := viper.GetString("database")
 		rd.ProjectPath = viper.GetString("project_path")
 
@@ -310,15 +337,20 @@ to quickly create a Cobra application.`,
 				os.Exit(1)
 			}
 			rd.Attributes[strings.Title(parts[0])] = parts[1]
-			fullPath := os.Getenv("GOPATH") + "/src/" + viper.GetString("project_path")
-			log.Println(fullPath)
-			switch database {
-			case "postgres":
-				createFileWithTemplate(fullPath+"/mapper/"+strings.ToLower(rd.Name)+"_mapper.go", rd, resourcePostgresMapperTemplateString)
-				createFileWithTemplate(fullPath+"/handler/"+strings.ToLower(rd.Name)+"_handler.go", rd, resourceHandlerTemplateString)
-			case "mongo":
-			default:
-			}
+
+		}
+		fullPath := os.Getenv("GOPATH") + "/src/" + viper.GetString("project_path")
+		log.Println(fullPath)
+		switch database {
+		case "postgres":
+			createFileWithTemplate(fullPath+"/mapper/"+strings.ToLower(rd.Name)+"_mapper.go", rd, resourcePostgresMapperTemplateString)
+			createFileWithTemplate(fullPath+"/handler/"+strings.ToLower(rd.Name)+"_handler.go", rd, resourceHandlerTemplateString)
+
+			files, _ := ioutil.ReadDir(fullPath + "/database/ddl/")
+			index := strconv.Itoa(len(files) + 1)
+			createFileWithTemplate(fullPath+"/database/ddl/"+index+"_"+strings.ToLower(rd.Name)+".sql", rd, resourceDatabaseTemplateString)
+		case "mongo":
+		default:
 		}
 	},
 }
