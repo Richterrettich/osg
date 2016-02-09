@@ -15,13 +15,16 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/serenize/snaker"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -102,6 +105,11 @@ func (r ResourceData) BuildUpdateStatementWithParameters() string {
 
 func (r ResourceData) LowercaseName() string {
 	return strings.ToLower(r.Name)
+}
+
+func (r ResourceData) ProjectName() string {
+	parts := strings.Split(r.ProjectPath, "/")
+	return parts[len(parts)-1]
 }
 
 const resourceHandlerTemplateString = `package handler
@@ -236,6 +244,14 @@ func (r ResourceData) CreateOrUpdateParameterList() string {
 	return paramList
 }
 
+func (r ResourceData) BuildStructAttributes() string {
+	result := "Id string `json:\"id\"`\n"
+	for k, v := range r.Attributes {
+		result = result + k + " " + v + " `json:\"" + snaker.CamelToSnake(k) + "\"`\n"
+	}
+	return result
+}
+
 const resourcePostgresMapperTemplateString = `package mapper
 import (
 	"fmt"
@@ -246,10 +262,7 @@ import (
 )
 
 type {{.Name}} struct {
-	Id string
-	{{range $key,$value := .Attributes}}
-	{{$key}} {{$value}}
-	{{end}}
+	{{.BuildStructAttributes}}
 }
 
 
@@ -309,6 +322,43 @@ func Delete{{.Name}}(id string) error {
 }
 `
 
+func (r ResourceData) TestEntity() string {
+	result := `entity := map[string]interface{}{
+		"id" : uuid.NewV4().String(),
+		`
+	for k, v := range r.Attributes {
+		result = result + `"` + k + `"` + ":" + randomAttribute(v) + ",\n\t"
+	}
+	return result + "}"
+}
+
+func randomAttribute(attributeType string) string {
+	switch attributeType {
+	case "int":
+		return strconv.Itoa(rand.Int())
+	case "string":
+		return "uuid.NewV4().String()"
+	default:
+		panic(errors.New("unknown datatype: " + attributeType))
+	}
+}
+
+const resourceIntegrationTestTemplate = `package main
+
+import (
+	"testing"
+	
+	"github.com/InteractiveLecture/testframework"
+)
+
+
+func {{.LowercaseName}}(t *testing.T){
+	usersUsername := testframework.RegisterNewUser(t, "users")
+	testframework.CheckUnauthorized(t, "/{{.ProjectName}}/{{.LowercaseName}}")
+	{{.TestEntity}}	
+}
+`
+
 // resourceCmd represents the resource command
 var resourceCmd = &cobra.Command{
 	Use:   "resource",
@@ -345,7 +395,7 @@ to quickly create a Cobra application.`,
 		case "postgres":
 			createFileWithTemplate(fullPath+"/mapper/"+strings.ToLower(rd.Name)+"_mapper.go", rd, resourcePostgresMapperTemplateString)
 			createFileWithTemplate(fullPath+"/handler/"+strings.ToLower(rd.Name)+"_handler.go", rd, resourceHandlerTemplateString)
-
+			createFileWithTemplate(fullPath+"/integration-test/"+strings.ToLower(rd.Name)+".go", rd, resourceIntegrationTestTemplate)
 			files, _ := ioutil.ReadDir(fullPath + "/database/ddl/")
 			index := strconv.Itoa(len(files) + 1)
 			createFileWithTemplate(fullPath+"/database/ddl/"+index+"_"+strings.ToLower(rd.Name)+".sql", rd, resourceDatabaseTemplateString)
